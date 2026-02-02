@@ -1,0 +1,6 @@
+streamlit
+pandas
+Pillow
+google-generativeai
+python-dotenv
+streamlit-aggrid
