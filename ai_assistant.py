@@ -11,10 +11,12 @@ api_key = os.getenv("GOOGLE_API_KEY")
 
 if api_key:
     genai.configure(api_key=api_key)
+else:
+    print("⚠️ УВАГА: API Key не знайдено! AI функції не працюватимуть.")
 
-# ВИКОРИСТОВУЄМО СТАБІЛЬНУ МОДЕЛЬ (щоб не було помилок 429)
-CURRENT_MODEL_NAME = 'gemini-2.5-flash'
-# Якщо 1.5 не працює, зміни на 'gemini-exp-1206' або 'gemini-pro'
+# ВИПРАВЛЕНО: Використовуємо існуючу модель (1.5 або 2.0)
+# 'gemini-1.5-flash' - найшвидша і найдешевша для таких задач
+CURRENT_MODEL_NAME = 'gemini-1.5-flash'
 
 CATEGORIES = [
     "🥩 М'ясо та Риба",
@@ -25,109 +27,152 @@ CATEGORIES = [
 ]
 
 
+# --- ХЕЛПЕРИ ---
+
+def _get_model(json_mode=False):
+    """
+    Фабрика моделей. Створює об'єкт моделі з потрібною конфігурацією.
+    Це економить код у функціях.
+    """
+    config = {"response_mime_type": "application/json"} if json_mode else {}
+    return genai.GenerativeModel(CURRENT_MODEL_NAME, generation_config=config)
+
+
+def _clean_json_response(text):
+    """
+    Іноді AI повертає JSON у Markdown блоках (```json ... ```).
+    Ця функція чистить це сміття перед парсингом.
+    """
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```json|^```", "", text)
+        text = re.sub(r"```$", "", text)
+    return text.strip()
+
+
+# --- ОСНОВНІ ФУНКЦІЇ ---
+
 def get_calories_from_ai(product_name, amount_str="порція"):
     """
-    Рахує калорії. Покращена версія для Планувальника.
-    Завжди повертає ціле число (int).
+    Рахує калорії. Повертає int.
     """
     try:
-        model = genai.GenerativeModel(CURRENT_MODEL_NAME)
+        # Використовуємо звичайний текстовий режим
+        model = _get_model(json_mode=False)
+
         prompt = (
-            f"Скільки кілокалорій (ккал) у продукті: '{product_name}', кількість/вага: '{amount_str}'? "
-            f"Важливо: Напиши ТІЛЬКИ одне ціле число. Без слів 'ккал', 'калорій', 'приблизно'. "
-            f"Якщо не вказана вага, рахуй середню порцію. "
-            f"Приклад відповіді: 250"
+            f"Завдання: Визнач калорійність.\n"
+            f"Продукт: {product_name}\n"
+            f"Кількість: {amount_str}\n"
+            f"Відповідь: ТІЛЬКИ одне ціле число (ккал). Якщо не знаєш — пиши 0."
         )
+
         response = model.generate_content(prompt)
         text = response.text.strip()
 
-        # Шукаємо всі групи цифр у тексті
+        # Витягуємо перше число, яке знайдемо
         numbers = re.findall(r'\d+', text)
+        return int(numbers[0]) if numbers else 0
 
-        if numbers:
-            return int(numbers[0])  # Беремо перше знайдене число
-        else:
-            return 0
     except Exception as e:
-        print(f"Calorie AI error: {e}")
+        print(f"⚠️ Calorie AI error: {e}")
         return 0
 
 
 def parse_fridge_input(text_input):
     """
-    Розбирає текст (список покупок або склад) на JSON.
-    Використовується в Складі та Списку покупок.
+    Перетворює текст списку на структурований JSON.
     """
     try:
-        model = genai.GenerativeModel(CURRENT_MODEL_NAME, generation_config={"response_mime_type": "application/json"})
+        # Вмикаємо JSON режим
+        model = _get_model(json_mode=True)
 
         prompt = (
-            f"Проаналізуй список продуктів: '{text_input}'. "
-            f"Поверни JSON масив об'єктів. Кожен об'єкт має поля: "
-            f"'item' (назва), 'amount' (кількість/вага - якщо немає, пиши '1 шт'), 'category'. "
-            f"Категорію обирай СТРОГО одну з цього списку: {CATEGORIES}. "
-            f"Якщо категорії немає в списку, став '🧀 Інше'."
+            f"Твоя роль: Парсер списку покупок.\n"
+            f"Вхідні дані: '{text_input}'\n"
+            f"Завдання: Поверни JSON масив об'єктів {{'item': str, 'amount': str, 'category': str}}.\n"
+            f"Правила:\n"
+            f"1. 'category' має бути ТІЛЬКИ з цього списку: {json.dumps(CATEGORIES, ensure_ascii=False)}.\n"
+            f"2. Якщо категорії немає — став '🧀 Інше'.\n"
+            f"3. Якщо вага не вказана — пиши '1 шт'."
         )
 
         response = model.generate_content(prompt)
-        parsed_data = json.loads(response.text)
+        text = _clean_json_response(response.text)
+        parsed_data = json.loads(text)
 
-        # Додаткова перевірка категорій (на випадок галюцинацій AI)
+        # Валідація категорій (Double check)
         final_list = []
-        for x in parsed_data:
-            if isinstance(x, dict):
-                if "category" not in x or x["category"] not in CATEGORIES:
-                    x["category"] = "🧀 Інше"
-                final_list.append(x)
+        if isinstance(parsed_data, list):
+            for x in parsed_data:
+                if isinstance(x, dict):
+                    # Страховка, якщо AI придумає свою категорію
+                    if x.get("category") not in CATEGORIES:
+                        x["category"] = "🧀 Інше"
+                    final_list.append(x)
 
         return final_list
 
     except Exception as e:
-        print(f"Parse error: {e}")
+        print(f"⚠️ Parse error: {e}")
         return []
 
 
 def ask_chef(fridge_list, history, user_query, strict_mode=False):
     """
-    Шеф-кухар з підтримкою суворого режиму.
+    Чат з шефом.
     """
     try:
-        model = genai.GenerativeModel(CURRENT_MODEL_NAME)
+        model = _get_model(json_mode=False)
 
-        fridge_text = ", ".join([f"{item['item']} ({item['amount']})" for item in fridge_list])
-        history_text = ", ".join([h['name'] for h in history[-5:]]) if history else "пусто"
+        # Формуємо контекст. Якщо холодильник великий, можна обрізати, але для тексту це не критично.
+        fridge_text = ", ".join([f"{i.get('item')} ({i.get('amount')})" for i in fridge_list])
+        history_text = ", ".join([h.get('name', '') for h in history[-5:]]) if history else "пусто"
+
+        system_instruction = (
+            "Ти професійний Шеф-кухар. Твоя відповідь має бути корисною, структурованою і смачною. "
+            "Використовуй емодзі. Форматуй відповідь Markdown."
+        )
 
         if strict_mode:
-            constraint = (
-                "СТРОГЕ ОБМЕЖЕННЯ: Готуй ТІЛЬКИ з продуктів у списку 'Холодильник'. "
-                "Не додавай нічого зайвого, крім води, солі та базових спецій. "
-                "Якщо неможливо приготувати запит користувача, запропонуй щось інше з наявного."
-            )
+            constraint = "⛔️ СУВОРИЙ РЕЖИМ: Використовуй ТІЛЬКИ продукти з холодильника (+ сіль, перець, олія, вода)."
         else:
-            constraint = (
-                "Можеш використовувати будь-які інгредієнти. "
-                "Якщо чогось немає в холодильнику - обов'язково виділи це в окремий список 'Треба докупити'."
-            )
+            constraint = "Вільний режим: Можеш пропонувати докупити інгредієнти."
 
         prompt = (
-            f"Ти Шеф. Холодильник: {fridge_text}. Запит: {user_query}. "
-            f"{constraint} "
-            f"Історія: {history_text}. "
-            f"Відповідь структуруй: Назва, Інгредієнти (що є/чого нема), Рецепт, Ккал."
+            f"{system_instruction}\n"
+            f"Холодильник: {fridge_text}\n"
+            f"Історія страв: {history_text}\n"
+            f"Запит користувача: {user_query}\n"
+            f"{constraint}\n\n"
+            f"Структура відповіді:\n"
+            f"1. 🍽 Назва страви\n"
+            f"2. 🛒 Інгредієнти (відміть, чого не вистачає)\n"
+            f"3. 👨‍🍳 Рецепт (покроково)\n"
+            f"4. 🔥 Орієнтовні калорії"
         )
+
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"Помилка Шефа: {e}"
+        return f"Вибачте, Шеф втомився (Помилка API: {e})"
 
 
 def format_recipe(text):
-    """Форматує рецепт для збереження в книгу"""
+    """
+    Витягує назву рецепта для заголовка.
+    """
     try:
-        # Проста евристика: беремо перший рядок як назву
-        lines = text.split('\n')
+        lines = [L.strip() for L in text.split('\n') if L.strip()]
+        if not lines: return "AI Рецепт|||" + text
+
+        # Шукаємо перший рядок, схожий на заголовок (без # і зірочок)
         title = lines[0].replace('#', '').replace('*', '').strip()
-        if len(title) > 50: title = "Смачний рецепт"
+
+        # Обмежуємо довжину заголовка, щоб не ламати верстку
+        if len(title) > 60:
+            title = title[:57] + "..."
+
         return f"{title}|||{text}"
     except:
         return f"AI Рецепт|||{text}"
@@ -135,43 +180,59 @@ def format_recipe(text):
 
 def analyze_recipe_for_cooking(recipe_text, current_fridge_list):
     """
-    Аналіз рецепту: повертає JSON зі списками
-    items_to_remove (що списати) та missing_items (чого не вистачає).
+    Аналізує рецепт і каже, що списати, а чого бракує.
+    Повертає JSON.
     """
     try:
-        model = genai.GenerativeModel(CURRENT_MODEL_NAME, generation_config={"response_mime_type": "application/json"})
+        model = _get_model(json_mode=True)
 
+        # Передаємо JSON холодильника рядком
         fridge_context = json.dumps(current_fridge_list, ensure_ascii=False)
 
         prompt = (
-            f"Рецепт: '{recipe_text}'.\n"
-            f"Холодильник (JSON): {fridge_context}.\n\n"
-            "Поверни JSON з полями:\n"
-            "1. 'dish_name': Назва страви.\n"
-            "2. 'calories': Калорійність (тільки число int).\n"
-            "3. 'items_to_remove': Список (item, amount, category), які Є в холодильнику і будуть використані.\n"
-            "4. 'missing_items': Список (item, amount, category), яких НЕ вистачає (або їх мало).\n"
-            f"Категорії бери тільки з: {CATEGORIES}"
+            f"Ти кухонний калькулятор.\n"
+            f"Рецепт: {recipe_text[:2000]} (обрізано для економії)\n"  # Обрізаємо занадто довгі рецепти
+            f"Холодильник: {fridge_context}\n"
+            f"Завдання: Порівняй інгредієнти рецепта з холодильником.\n\n"
+            f"Поверни JSON:\n"
+            f"{{\n"
+            f"  'dish_name': 'Назва страви',\n"
+            f"  'calories': 500, (int)\n"
+            f"  'items_to_remove': [ {{'item': 'назва як в холодильнику', 'amount': 'скільки списати', 'category': '...'}} ],\n"
+            f"  'missing_items': [ {{'item': 'чого нема', 'amount': 'скільки треба', 'category': '...'}} ]\n"
+            f"}}\n"
+            f"Важливо: Намагайся співставити продукти (наприклад 'яйця' і 'Яйце куряче' - це те саме)."
         )
 
         response = model.generate_content(prompt)
-        return json.loads(response.text)
+        text = _clean_json_response(response.text)
+        return json.loads(text)
+
     except Exception as e:
-        print(f"Cooking analysis error: {e}")
+        print(f"⚠️ Cooking analysis error: {e}")
         return None
 
 
 def analyze_image(image):
-    """Сканер чеків"""
+    """
+    Vision API: розпізнає продукти на фото.
+    """
     try:
-        model = genai.GenerativeModel(CURRENT_MODEL_NAME, generation_config={"response_mime_type": "application/json"})
+        model = _get_model(json_mode=True)
+
         prompt = (
-            f"Проаналізуй фото (чек або холодильник). Випиши продукти. "
-            f"Поверни JSON масив: 'item', 'amount', 'category'. "
-            f"Категорії ТІЛЬКИ такі: {CATEGORIES}."
+            f"Проаналізуй зображення.\n"
+            f"Випиши всі продукти харчування у форматі JSON масиву.\n"
+            f"Поля: item, amount, category.\n"
+            f"Категорії ТІЛЬКИ: {json.dumps(CATEGORIES, ensure_ascii=False)}.\n"
+            f"Якщо не впевнений - category='🧀 Інше'."
         )
+
+        # Gemini підтримує PIL Image напряму
         response = model.generate_content([prompt, image])
-        return json.loads(response.text)
+        text = _clean_json_response(response.text)
+        return json.loads(text)
+
     except Exception as e:
-        print(f"Vision error: {e}")
+        print(f"⚠️ Vision error: {e}")
         return []

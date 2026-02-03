@@ -1,39 +1,59 @@
 import json
 import os
+import copy  # <-- Додали для копіювання об'єктів
 
 DATA_FILE = "data.json"
 
+# Єдине джерело правди для структури даних
+DEFAULT_SCHEMA = {
+    "fridge": [],
+    "history": [],
+    "recipes": [],
+    "shopping_list": [],
+    "diet_plan": {},
+    "settings": {}
+}
 
 def load_data():
+    """
+    Завантажує дані та гарантує, що всі ключі з DEFAULT_SCHEMA існують.
+    """
+    # Якщо файлу немає — одразу віддаємо чисту копію шаблону
     if not os.path.exists(DATA_FILE):
-        return {
-            "fridge": [],
-            "history": [],
-            "recipes": [],
-            "shopping_list": [],
-            "diet_plan": {},  # <-- НОВЕ ПОЛЕ: Планувальник
-            "settings": {}
-        }
+        return copy.deepcopy(DEFAULT_SCHEMA)
 
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            # Перевірки цілісності (щоб старі файли не ламали програму)
-            if "fridge" not in data: data["fridge"] = []
-            if "history" not in data: data["history"] = []
-            if "diet_plan" not in data: data["diet_plan"] = {}  # <-- Додаємо при завантаженні
-            if "recipes" not in data: data["recipes"] = []
-            if "shopping_list" not in data: data["shopping_list"] = []
-            if "settings" not in data: data["settings"] = {}
-            return data
-    except Exception as e:
-        print(f"Error loading data: {e}")
-        return {"fridge": [], "history": [], "diet_plan": {}, "recipes": [], "shopping_list": [], "settings": {}}
+
+        # "Лікуємо" дані
+        for key, default_val in DEFAULT_SCHEMA.items():
+            if key not in data:
+                # ВАЖЛИВО: Використовуємо deepcopy, щоб не змінювати сам шаблон DEFAULT_SCHEMA
+                data[key] = copy.deepcopy(default_val)
+
+        return data
+
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"⚠️ Помилка читання JSON ({e}). Створено нову базу.")
+        return copy.deepcopy(DEFAULT_SCHEMA)
 
 
 def save_data(data):
+    """
+    Безпечний запис: спочатку в тимчасовий файл, потім підміна.
+    """
+    temp_file = f"{DATA_FILE}.tmp"
     try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
+        # Пишемо в .tmp
+        with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
+
+        # Атомарна підміна (миттєва операція)
+        os.replace(temp_file, DATA_FILE)
+
     except Exception as e:
-        print(f"Error saving data: {e}")
+        print(f"❌ Помилка запису даних: {e}")
+        # Прибираємо сміття
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
