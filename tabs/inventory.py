@@ -6,220 +6,240 @@ import table_factory as tf
 import data_handler as dh
 
 
-# --- Хелпери для категорій (щоб не дублювати код) ---
+# --- [ 1. ВІЗУАЛЬНІ ХЕЛПЕРИ V1.0 ] ---
 
 def apply_display_categories(df, user_icons):
-    """Додає іконки до категорій у DataFrame для краси."""
+    """
+    Готує дані для відображення: додає іконки до назв категорій.
+    Це дозволяє JavaScript у table_factory правильно розпізнавати рядки для фарбування.
+    """
     if df.empty or 'category' not in df.columns:
         return df
 
-    # Робимо копію, щоб не ламати оригінальні дані в пам'яті
     df_display = df.copy()
 
     def format_cat(cat_str):
-        # Логіка та сама: розбиваємо рядок, шукаємо іконку
+        # Розділяємо "🍎 М'ясо" на іконку та назву
         parts = cat_str.split(" ", 1)
-        if len(parts) < 2: return cat_str
-        text = parts[1]
-        # Якщо є кастомна іконка - беремо її, інакше лишаємо як було
-        return f"{user_icons.get(cat_str, parts[0])} {text}"
+        if len(parts) < 2:
+            return cat_str
+
+        # Перевіряємо, чи є у користувача кастомна іконка для цієї категорії
+        icon = user_icons.get(cat_str, parts[0])
+        return f"{icon} {parts[1]}"
 
     df_display['category'] = df_display['category'].apply(format_cat)
     return df_display
 
 
 def restore_categories(data_list, user_icons):
-    """Відновлює оригінальні назви категорій перед збереженням у JSON."""
-    # Створюємо мапу: "Іконка Назва" -> "Оригінальна Назва"
-    # Це потрібно, щоб база даних завжди була чиста
+    """
+    Обернена функція: прибирає іконки перед збереженням у JSON.
+    Це критично важливо для чистоти бази даних стартапу.
+    """
+    # Створюємо мапу: "Кастомна_Іконка Назва" -> "Оригінальна_Категорія"
     reverse_map = {}
     for raw_cat in ai.CATEGORIES:
         parts = raw_cat.split(" ", 1)
         if len(parts) == 2:
-            display_cat = f"{user_icons.get(raw_cat, parts[0])} {parts[1]}"
-            reverse_map[display_cat] = raw_cat
+            display_name = f"{user_icons.get(raw_cat, parts[0])} {parts[1]}"
+            reverse_map[display_name] = raw_cat
 
-    # Проходимось по списку і міняємо назад
     clean_data = []
     for item in data_list:
-        # Копіюємо, щоб не чіпати UI об'єкт
         clean_item = item.copy()
-        curr = clean_item.get("category")
-        if curr in reverse_map:
-            clean_item["category"] = reverse_map[curr]
+        curr_cat = clean_item.get("category")
+
+        # Якщо категорія у форматі з іконкою — повертаємо оригінал
+        if curr_cat in reverse_map:
+            clean_item["category"] = reverse_map[curr_cat]
         clean_data.append(clean_item)
 
     return clean_data
 
 
-# --- Основні функції ---
+# --- [ 2. ОСНОВНИЙ МОДУЛЬ: ХОЛОДИЛЬНИК ] ---
 
 def render_fridge(data):
-    """Вкладка Холодильник"""
+    """
+    Рендеринг вкладки Холодильник (Inventory).
+    Виводить метрики, блок додавання через AI та професійну таблицю AgGrid.
+    """
     st.header("🏢 Управління запасами")
 
-    fridge_items = data["fridge"]
+    # Завантаження ресурсів
+    user_icons = data.get("settings", {}).get("custom_icons", {})
+    saved_colors = data.get("settings", {}).get("category_colors", {})
+    fridge_items = data.get("fridge", [])
 
-    # Метрики: рахуємо напряму зі списку (швидше, ніж створювати DF)
+    # === БЛОК МЕТРИК ===
     if fridge_items:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Усього позицій", len(fridge_items))
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Усього позицій", len(fridge_items))
 
-        # Для складнішої агрегації DF все ж зручніший
-        df = pd.DataFrame(fridge_items)
-        c2.metric("Категорій", df['category'].nunique() if 'category' in df else 0)
+        df_temp = pd.DataFrame(fridge_items)
+        if not df_temp.empty and 'category' in df_temp.columns:
+            m2.metric("Категорій", df_temp['category'].nunique())
+            top_cat = df_temp['category'].value_counts().idxmax()
 
-        user_icons = data["settings"].get("custom_icons", {})
-        top_cat = df['category'].value_counts().idxmax() if not df.empty else "—"
+            # Форматуємо топ-категорію для красивого виводу в метриці
+            pretty_top = apply_display_categories(pd.DataFrame({'category': [top_cat]}), user_icons)['category'][0]
+            m3.metric("Топ категорія", pretty_top)
 
-        # Тут трохи спростив виклик форматування
-        c3.metric("Топ категорія",
-                  apply_display_categories(pd.DataFrame({'category': [top_cat]}), user_icons)['category'][0])
+    # === БЛОК ДОДАВАННЯ ПРОДУКТІВ ===
+    with st.expander("➕ Поповнити холодильник (AI)"):
+        col_txt, col_img = st.columns(2)
 
-    # Блок додавання (залишив логіку без змін, вона нормальна)
-    with st.expander("➕ Додати продукти"):
-        col_text, col_scan = st.columns(2)
-        with col_text:
-            st.subheader("📝 Текст")
-            raw_input = st.text_input("Список через кому:", key="fridge_add", placeholder="молоко, сир...")
-            if st.button("Розібрати список", key="btn_fridge_add", use_container_width=True):
-                if raw_input:
-                    with st.spinner("AI сортує..."):
-                        items = ai.parse_fridge_input(raw_input)
-                        data["fridge"].extend(items)
+        with col_txt:
+            st.subheader("📝 Текстовий ввід")
+            raw_text = st.text_input("Введіть продукти через кому:", key="f_text_v1",
+                                     placeholder="яблука 2кг, молоко...")
+            if st.button("Розібрати список", key="f_btn_txt", use_container_width=True):
+                if raw_text:
+                    with st.spinner("AI сортує продукти..."):
+                        new_items = ai.parse_fridge_input(raw_text)
+                        data["fridge"].extend(new_items)
                         dh.save_data(data)
                         st.rerun()
-        with col_scan:
-            st.subheader("🧾 Чек")
-            uploaded_file = st.file_uploader("Фото чека", type=["jpg", "jpeg", "png"], key="fridge_upl")
-            if uploaded_file and st.button("🔍 Оцифрувати чек", key="btn_fridge_upl", use_container_width=True):
-                with st.spinner("AI сканує..."):
-                    items = ai.analyze_image(Image.open(uploaded_file))
-                    data["fridge"].extend(items)
+
+        with col_img:
+            st.subheader("📸 Оцифрування")
+            uploaded_file = st.file_uploader("Фото чека або продуктів:", type=["jpg", "png", "jpeg"], key="f_img_v1")
+            if uploaded_file and st.button("🔍 Оцифрувати", key="f_btn_img", use_container_width=True):
+                with st.spinner("AI розпізнає продукти..."):
+                    img_items = ai.analyze_image(Image.open(uploaded_file))
+                    data["fridge"].extend(img_items)
                     dh.save_data(data)
                     st.rerun()
 
-    st.write("---")
+    st.divider()
 
-    # Таблиця
+    # === ПРОФЕСІЙНА ТАБЛИЦЯ (Inventory Grid) ===
     if fridge_items:
-        st.subheader("📊 Холодильник")
-        filter_options = ["Усі продукти"] + ai.CATEGORIES
-        selected_cat = st.selectbox("🔍 Що показати?", filter_options)
+        st.subheader("📊 Поточний стан складу")
 
+        # Фільтр по категоріях
+        all_cats = ["Усі продукти"] + ai.CATEGORIES
+        selected_cat = st.selectbox("🔍 Фільтр по виду продукту:", all_cats)
+
+        # 1. Підготовка DataFrame (Суворий порядок колонок)
         df = pd.DataFrame(fridge_items)
-        user_icons = data["settings"].get("custom_icons", {})
+        if "category" not in df.columns:
+            df["category"] = "🧀 Інше"
 
-        # Форматуємо категорії для відображення
+        # Гарантуємо 3 колонки: Продукт, Кількість, Категорія (Вид)
+        df = df[['item', 'amount', 'category']]
+
+        # 2. Підготовка мапи кольорів (Форматуємо ключі для JS)
+        display_colors = {}
+        for raw_cat, color_hex in saved_colors.items():
+            fmt_cat = apply_display_categories(pd.DataFrame({'category': [raw_cat]}), user_icons)['category'][0]
+            display_colors[fmt_cat] = color_hex
+
+        # 3. Підготовка даних для відображення (Іконки)
         df_display = apply_display_categories(df, user_icons)
 
-        # Фільтрація
-        # Треба отримати "красиву" назву обраної категорії для порівняння
-        temp_df = pd.DataFrame({'category': [selected_cat]})
-        display_selected_cat = apply_display_categories(temp_df, user_icons)['category'][
+        # 4. Логіка фільтрації
+        temp_filter_df = pd.DataFrame({'category': [selected_cat]})
+        display_filter_name = apply_display_categories(temp_filter_df, user_icons)['category'][
             0] if selected_cat != "Усі продукти" else "Усі продукти"
 
-        if display_selected_cat != "Усі продукти":
-            df_to_show = df_display[df_display["category"] == display_selected_cat]
-            should_group = False
+        if display_filter_name != "Усі продукти":
+            df_to_show = df_display[df_display["category"] == display_filter_name]
         else:
+            # Сортуємо для "зебри" або групування
             df_to_show = df_display.sort_values(['category', 'item'])
-            should_group = True
 
-        # Кольори для таблиці
-        saved_colors = data["settings"].get("category_colors", {})
-        # Генеруємо мапу кольорів на льоту, використовуючи "красиві" назви як ключі
-        display_colors = {}
-        for raw_cat, color in saved_colors.items():
-            # Створюємо фейковий DF, щоб перевикористати функцію форматування
-            fmt_cat = apply_display_categories(pd.DataFrame({'category': [raw_cat]}), user_icons)['category'][0]
-            display_colors[fmt_cat] = color
+        # --- ВИКЛИК ТАБЛИЦІ ---
+        # Використовуємо твою AgGrid фабрику
+        updated_data = tf.draw_pro_table(
+            df_to_show,
+            enable_grouping=False,  # Вимикаємо дерево, щоб бачити 3-ю колонку окремо
+            color_map=display_colors
+        )
 
-        updated_data = tf.draw_pro_table(df_to_show, enable_grouping=should_group, color_map=display_colors)
-
-        col_save, col_clear = st.columns(2)
-        with col_save:
-            if st.button("💾 Фіксувати зміни", use_container_width=True):
-                # Перетворюємо назад у словник
-                curr_data = updated_data if isinstance(updated_data, list) else updated_data.to_dict(orient="records")
-
-                # Чистимо категорії від іконок перед записом у БД
-                data["fridge"] = restore_categories(curr_data, user_icons)
-
+        # 5. Кнопки управління
+        c_save, c_clear = st.columns(2)
+        with c_save:
+            if st.button("💾 Фіксувати зміни в базі", use_container_width=True):
+                # Отримуємо дані з AgGrid
+                raw_table_res = updated_data if isinstance(updated_data, list) else updated_data.to_dict(
+                    orient="records")
+                # Очищуємо іконки
+                data["fridge"] = restore_categories(raw_table_res, user_icons)
                 dh.save_data(data)
-                st.success("Зміни збережено!")
+                st.success("Зміни успішно збережені!")
                 st.rerun()
 
-        with col_clear:
-            if st.button("🗑 Очистити холодильник", use_container_width=True):
+        with c_clear:
+            if st.button("🗑 Очистити склад", use_container_width=True):
                 data["fridge"] = []
                 dh.save_data(data)
                 st.rerun()
     else:
-        st.info("Холодильник порожній.")
+        st.info("Ваш холодильник порожній. Використовуйте блок вище, щоб додати продукти.")
 
+
+# --- [ 3. МОДУЛЬ: СПИСОК ПОКУПОК ] ---
 
 def render_shopping(data):
-    """Вкладка Покупки"""
-    st.header("🛍 Що треба купити")
+    """Управління списком покупок (Shopping List)."""
+    st.header("🛍 План закупівель")
 
-    # Додавання
+    user_icons = data.get("settings", {}).get("custom_icons", {})
+    saved_colors = data.get("settings", {}).get("category_colors", {})
+    shopping_items = data.get("shopping_list", [])
+
     with st.expander("➕ Додати в список вручну"):
-        shop_input = st.text_input("Назва продукту:", key="shop_text_add")
-        if st.button("Додати", key="btn_shop_add"):
-            if shop_input:
-                with st.spinner("AI категоризує..."):
-                    items = ai.parse_fridge_input(shop_input)
-                    data["shopping_list"].extend(items)
-                    dh.save_data(data)
-                    st.rerun()
-
-    shopping_items = data["shopping_list"]
-
-    if shopping_items:
-        st.caption("Виділи продукти та натисни 'Купив', щоб перенести їх у холодильник.")
-
-        user_icons = data["settings"].get("custom_icons", {})
-        df_shop = pd.DataFrame(shopping_items)
-
-        # Використовуємо наш хелпер для красивих категорій
-        df_display = apply_display_categories(df_shop, user_icons)
-
-        # Кольори (аналогічно fridge)
-        saved_colors = data["settings"].get("category_colors", {})
-        display_colors = {}
-        for raw_cat, color in saved_colors.items():
-            fmt_cat = apply_display_categories(pd.DataFrame({'category': [raw_cat]}), user_icons)['category'][0]
-            display_colors[fmt_cat] = color
-
-        updated_shop_data = tf.draw_pro_table(df_display, enable_grouping=True, color_map=display_colors)
-
-        c_save_shop, c_bought = st.columns(2)
-
-        # Конвертуємо дані таблиці в список словників один раз
-        table_data_dicts = updated_shop_data if isinstance(updated_shop_data, list) else updated_shop_data.to_dict(
-            orient="records")
-
-        with c_save_shop:
-            if st.button("💾 Зберегти список", key="save_shop_list", use_container_width=True):
-                # Відновлюємо "чисті" категорії
-                data["shopping_list"] = restore_categories(table_data_dicts, user_icons)
+        shop_item_name = st.text_input("Назва товару:", key="s_manual_v1")
+        if st.button("Додати", key="s_btn_manual"):
+            if shop_item_name:
+                # Використовуємо AI для миттєвої категоризації
+                new_shop_items = ai.parse_fridge_input(shop_item_name)
+                data["shopping_list"].extend(new_shop_items)
                 dh.save_data(data)
-                st.success("Оновлено!")
                 st.rerun()
 
-        with c_bought:
-            if st.button("✅ Я КУПИВ ЦЕ (В Холодильник)", use_container_width=True):
-                # Відновлюємо категорії
-                clean_items = restore_categories(table_data_dicts, user_icons)
+    if shopping_items:
+        st.write("Позначте куплені товари та натисніть кнопку внизу.")
+
+        # Підготовка таблиці (Аналогічно складу)
+        df_shop = pd.DataFrame(shopping_items)[['item', 'amount', 'category']]
+        df_shop_display = apply_display_categories(df_shop, user_icons)
+
+        shop_colors = {}
+        for rc, ch in saved_colors.items():
+            fmt = apply_display_categories(pd.DataFrame({'category': [rc]}), user_icons)['category'][0]
+            shop_colors[fmt] = ch
+
+        # Рендеринг списку покупок
+        updated_shop = tf.draw_pro_table(df_shop_display, enable_grouping=False, color_map=shop_colors)
+
+        # Кнопки дій для покупок
+        col_s1, col_s2 = st.columns(2)
+
+        # Конвертуємо результат AgGrid
+        shop_table_data = updated_shop if isinstance(updated_shop, list) else updated_shop.to_dict(orient="records")
+
+        with col_s1:
+            if st.button("💾 Зберегти список", key="s_save_list", use_container_width=True):
+                data["shopping_list"] = restore_categories(shop_table_data, user_icons)
+                dh.save_data(data)
+                st.toast("Список оновлено!")
+
+        with col_s2:
+            if st.button("✅ ПЕРЕНЕСТИ В ХОЛОДИЛЬНИК", type="primary", use_container_width=True):
+                # Відновлюємо чисті категорії
+                clean_bought = restore_categories(shop_table_data, user_icons)
 
                 # Переносимо все в холодильник
-                data["fridge"].extend(clean_items)
-                data["shopping_list"] = []  # Очищаємо список покупок
+                data["fridge"].extend(clean_bought)
+                # Очищуємо список покупок
+                data["shopping_list"] = []
 
                 dh.save_data(data)
                 st.balloons()
-                st.success("Продукти перенесено в холодильник!")
+                st.success(f"Перенесено {len(clean_bought)} продуктів!")
                 st.rerun()
     else:
-        st.info("Список покупок порожній.")
+        st.info("Ваш список покупок порожній")

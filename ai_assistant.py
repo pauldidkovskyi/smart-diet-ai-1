@@ -9,6 +9,10 @@ from PIL import Image
 # Завантаження змінних середовища
 load_dotenv()
 
+# --- ⚙️ НАЛАШТУВАННЯ МОДЕЛІ (ЗМІНЮВАТИ ТУТ) ---
+# Якщо 'gemini-1.5-flash' видає помилку 404 -> зміни на 'gemini-pro'
+CURRENT_MODEL_NAME = 'gemini-2.5-flash'
+
 CATEGORIES = [
     "🥩 М'ясо та Риба",
     "🥦 Овочі та Фрукти",
@@ -39,8 +43,8 @@ def get_api_key():
 
 def _get_model(json_mode=False):
     """
-    АВТОМАТИЧНИЙ ПІДБІР МОДЕЛІ.
-    Ця функція сама знайде, яка модель доступна для твого ключа.
+    Підключається до моделі, яка вказана в CURRENT_MODEL_NAME зверху файлу.
+    Без переборів і циклів.
     """
     api_key = get_api_key()
     if not api_key:
@@ -59,46 +63,15 @@ def _get_model(json_mode=False):
     if json_mode:
         generation_config["response_mime_type"] = "application/json"
 
-    # 1. Спроба №1: Жорстко пробуємо Flash (вона найкраща)
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash', generation_config=generation_config)
-        model.generate_content("test")  # Перевірка зв'язку
+        # Створюємо модель прямо, без циклів
+        model = genai.GenerativeModel(
+            model_name=CURRENT_MODEL_NAME,
+            generation_config=generation_config
+        )
         return model
-    except:
-        pass  # Якщо Flash немає, йдемо далі
-
-    # 2. Спроба №2: Авто-пошук по списку доступних моделей
-    try:
-        print("⚠️ Flash недоступна, шукаємо іншу модель...")
-        available_models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m.name)
-
-        # Логіка вибору: шукаємо 'flash', якщо ні - 'pro', якщо ні - будь-що стабільне
-        chosen_model_name = None
-
-        # Шукаємо Pro (1.5 або 1.0)
-        for name in available_models:
-            if 'pro' in name and 'vision' not in name:
-                chosen_model_name = name
-                break
-
-        # Якщо Pro немає, беремо першу ліпшу gemini
-        if not chosen_model_name:
-            for name in available_models:
-                if 'gemini' in name:
-                    chosen_model_name = name
-                    break
-
-        if chosen_model_name:
-            # print(f"✅ Підключено до: {chosen_model_name}")
-            return genai.GenerativeModel(chosen_model_name, generation_config=generation_config)
-
     except Exception as e:
-        raise ValueError(f"Помилка при пошуку моделей: {e}")
-
-    raise ValueError("Не знайдено жодної робочої моделі AI для цього ключа.")
+        raise ValueError(f"Помилка підключення до моделі '{CURRENT_MODEL_NAME}'. Спробуй змінити назву моделі в коді. Деталі: {e}")
 
 
 def _clean_json_response(text):
