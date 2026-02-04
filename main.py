@@ -76,17 +76,17 @@ def main():
 
         # Вкладки харчування
         food_tabs = st.tabs([
-            "📅 Планувальник",
             "❄️ Холодильник",
+            "📅 Планувальник",
             "🛒 Покупки",
             "👨‍🍳 Шеф-кухар",
             "📖 Рецепти"
         ])
 
         with food_tabs[0]:
-            kitchen.render_planner(data_ref)
-        with food_tabs[1]:
             inventory.render_fridge(data_ref)
+        with food_tabs[1]:
+            kitchen.render_planner(data_ref)
         with food_tabs[2]:
             inventory.render_shopping(data_ref)
         with food_tabs[3]:
